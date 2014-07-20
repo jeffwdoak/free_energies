@@ -1,12 +1,14 @@
+#!/usr/bin/python
 
 # port of atat felec.c++ code to python. Uses DOSCAR instead of dos.out
-# electronicdos.py v0.5 5-18-2012 Jeff Doak jeff.w.doak@gmail.com
+# electronicdos.py v0.7 5-23-2012 Jeff Doak jeff.w.doak@gmail.com
 import numpy as np
 from scipy.interpolate import UnivariateSpline
 from scipy.integrate import quad
-from scipy.optimize import fsolve
+from scipy.optimize import brentq
 import sys,subprocess
-BOLTZCONST = 8.617e-5 #eV/K
+#BOLTZCONST = 8.617e-5 #eV/K
+BOLTZCONST = 1.380658e-23/1.60217733e-19;
 
 class ElectronicDOS:
     """
@@ -62,23 +64,19 @@ class ElectronicDOS:
                 self.read_ezvasp_dos(input_)
             else:
                 self.read_doscar(input_)
-        #self.get_bandgap()
-        #self.shift_energy(self.e_min)
-        # Total # electrons in calculation
-        #nelec = subprocess.Popen("grep NELECT OUTCAR",
-        #        shell=True,stdin=None,stdout=subprocess.PIPE).communicate()[0]
-        #nelec = int(float(nelec.split()[2]))
+                nelec = subprocess.Popen("grep NELECT OUTCAR",
+                    shell=True,stdin=None,stdout=subprocess.PIPE).communicate()[0]
+                self.nelec = int(float(nelec.split()[2]))
+                self.get_bandgap()
+                self.dos_tot = self.dos_tot*self.step_size
+                e = self.e_min
+                for i in range(len(self.dos_tot)):
+                    if self.dos_tot[i] > 1e-2:
+                        e = self.energy[i]
+                        break
+                self.shift_energy(e)
         # ATAT ported code here:
-        #ne = 0.0
-        #i = 0
-        #while ne < nelec and i < len(self.dos_tot):
-        #    ne += self.dos_tot[i]
-        #    i += 1
-        #Ef = self.step_size*(i-1)+self.e_min
-        #print self.e_min,self.vbm,self.cbm,self.band_gap
-        #print "VASP fermi energy:",str(self.e_fermi)
-        #print "ATAT fermi energy:",str(Ef)
-
+        self.atat_main()
 
     def read_doscar(self,input_):
         """
@@ -117,63 +115,208 @@ class ElectronicDOS:
         #self.n_atoms - get from  poscar/outcar/contcar
         self.e_min = 0.0
         line = input_.readline().split()
-        self.nelec = float(line[0])
+        self.nelec = int(float(line[0]))
         self.step_size = float(line[1])
-        scale = float(line[2])
+        self.scale = float(line[2])
         energy = []; dos_tot = []
         i = 0
         for line in input_:
             line = line.split()
-            dos_tot.append(float(line[0]))
+            dos_tot.append(float(line[0])*self.step_size)
             energy.append(float(i)*self.step_size)
             i += 1
         self.energy = np.array(energy)
         self.dos_tot = np.array(dos_tot)
 
-    def calc_nelec(mu,T):
+    def calc_nelec(self,mu,w):
         ne=0.0
         for i in range(len(self.dos_tot)):
-            ne += self.dos_tot[i]/(np.exp((self.energy[i]-mu)/(BOLTZCONST*T))+1.)
+            ne += self.dos_tot[i]/(np.exp((float(i)-mu)/w)+1.)
         return ne
 
-    def calc_ncond(mu,T):
+    def calc_econd(self,mu,temp):
+        mu = mu/self.step_size
+        w = BOLTZCONST*temp/self.step_size
         ne = 0.0
         for i in range(len(self.dos_tot)):
-            if self.energy[i] > mu:
-                ne += self.dos_tot[i]/(np.exp((self.energy[i]-mu)/(BOLTZCONST*T))+1.)
+            if float(i) > mu:
+                ne += self.dos_tot[i]/(np.exp((float(i)-mu)/w)+1.)
         return ne
 
-    def calc_hval(mu,T):
+    def calc_hval(self,mu,temp):
+        mu = mu/self.step_size
+        w = BOLTZCONST*temp/self.step_size
         nh = 0.0
         for i in range(len(self.dos_tot)):
-            if self.energy[i] < mu:
-                nh += self.dos_tot[i]/(np.exp((mu-self.energy[i])/(BOLTZCONST*T))+1.)
+            if float(i) < mu:
+                nh += self.dos_tot[i]/(np.exp((mu-float(i))/w)+1.)
         return nh
 
-    def calc_Selec(mu,T):
+    def calc_Selec(self,mu,w):
         S = 0.0
         for i in range(len(self.dos_tot)):
-            f = 1.0/(np.exp((self.energy[i]-mu)/(BOLTZCONST*T))+1.)
-            if f > 1e-5 and (1.0-f) > 1e-5:
-                S += self.dos_tot[i]*(f*np.log(f)+(1.-f)*np.log(1.-f))
+            f = 1.0/(np.exp((float(i)-mu)/w)+1.)
+            if (f > 1e-5 and (1.0-f) > 1e-5):
+                S += -self.dos_tot[i]*(f*np.log(f)+(1.-f)*np.log(1.-f))
         return S
 
-    def calc_Eelec(mu,T):
+    def calc_Eelec(self,mu,w,dE):
         E = 0.0
         for i in range(len(self.dos_tot)):
-            e = self.energy[i]*self.step_size
-            if (e-mu) < -30.*BOLTZCONST*T:
+            e = dE*float(i)
+            if (e-mu) < -30.*w:
                 f = 1.0
-            elif (e-mu) > 30.*BOLTZCONST*T:
+            elif (e-mu) > 30.*w:
                 f = 0.0
             else:
-                f = 1./(np.exp((e-mu)/(BOLTZCONST*T))+1.)
+                f = 1./(np.exp((e-mu)/w)+1.)
             E += self.dos_tot[i]*e*f
         return E
 
+    def atat_charge_neut(self,dE,temp):
+        """
+        Old ATAT version calculation of chemical potential:
+        """
+        ne_tol = 1e-7*self.nelec
+        El = self.Ef
+        Eh = self.Ef
+        while self.calc_nelec(El/dE,BOLTZCONST*temp/dE) > self.nelec:
+            El += -BOLTZCONST*temp
+        while self.calc_nelec(Eh/dE,BOLTZCONST*temp/dE) < self.nelec:
+            Eh += BOLTZCONST*temp
+        while True:
+            mu = (Eh+El)/2.
+            ne = self.calc_nelec(mu/dE,BOLTZCONST*temp/dE)
+            if ne < self.nelec:
+                El = mu
+            else:
+                Eh = mu
+            if not (np.abs(ne-self.nelec) > ne_tol):
+                break
+        ne = self.calc_econd(mu,temp)
+        nh = self.calc_hval(mu,temp)
+        return mu,ne,nh
 
+    def charge_neutrality(self,dE,temp):
+        """
+        Calculate electron chemical potentials based on charge neutrality
+        between the number of conduction electrons and valence holes.
+        """
+        ne_tol = 1e-7*self.nelec
+        El = self.Ef
+        Eh = self.Ef
+        while self.calc_econd(El,temp) > self.calc_hval(El,temp):
+            El += -BOLTZCONST*temp
+        while self.calc_econd(Eh,temp) < self.calc_hval(Eh,temp):
+            Eh += BOLTZCONST*temp
+        while True:
+            mu = (Eh+El)/2.
+            ne = self.calc_econd(mu,temp)
+            nh = self.calc_hval(mu,temp)
+            if ne < nh:
+                El = mu
+            else:
+                Eh = mu
+            if not (np.abs(ne-nh) > ne_tol):
+                break
+        return mu,ne,nh
 
+    def charge_neutrality2(self,dE,temp):
+        """
+        Calculate electron chemical potentials based on charge neutrality
+        between the number of conduction electrons and valence holes.
+        """
+        ne_tol = 1e-7*self.nelec
+        El = self.Ef
+        Eh = self.Ef
+        while self.calc_hval(El,temp) - self.calc_econd(El,temp) < 0:
+            El += -BOLTZCONST*temp
+        while self.calc_hval(Eh,temp) - self.calc_econd(Eh,temp) > 0:
+            Eh += BOLTZCONST*temp
+        while True:
+            mu = (Eh+El)/2.
+            ne = self.calc_econd(mu,temp)
+            nh = self.calc_hval(mu,temp)
+            if nh - ne > 0:
+                El = mu
+            else:
+                Eh = mu
+            if not (np.abs(nh-ne) > ne_tol):
+                break
+        return mu,ne,nh
 
+    def fsolve_neutrality(self,dE,temp,mu0):
+        """
+        Calculate electron chemical potentials based on charge neutrality
+        between electrons and holes, using fsolve to find mu_e.
+        """
+        ne_tol = 1e-7
+        def neutrality(mu,self,temp):
+            ne = self.calc_econd(mu,temp)
+            nh = self.calc_hval(mu,temp)
+            return (ne - nh)
+        # Find bounds for brentq
+        El = self.Ef
+        Eh = self.Ef
+        while self.calc_econd(El,temp) > self.calc_hval(El,temp):
+            El += -BOLTZCONST*temp
+        while self.calc_econd(Eh,temp) < self.calc_hval(Eh,temp):
+            Eh += BOLTZCONST*temp
+        # Run optimization using brentq
+        mu = brentq(neutrality,El,Eh,args=(self,temp),xtol=ne_tol,maxiter=100)
+        ne = self.calc_econd(mu,temp)
+        nh = self.calc_hval(mu,temp)
+        return mu,ne,nh
+
+    def atat_main(self):
+        ne = 0.0
+        dE = float(self.step_size)
+        i = 0
+        while ne<self.nelec and i < len(self.dos_tot):
+            ne += self.dos_tot[i]
+            i += 1
+        self.Ef = dE*(i-1.) + self.e_min
+
+        ne_tol = 1e-7*self.nelec
+        E0 = None
+        zero_tolerance = 1e-3
+
+        temps = np.linspace(0,2000,21)
+        mu_e = np.zeros_like(temps)
+        E_el = np.zeros_like(temps)
+        S_el = np.zeros_like(temps)
+        F_el = np.zeros_like(temps)
+        num_e = np.zeros_like(temps)
+        num_h = np.zeros_like(temps)
+
+        for i in range(len(temps)):
+            if temps[i] < zero_tolerance:
+                mu_e[i] = self.Ef
+                E_el[i] = 0.
+                S_el[i] = 0.
+                F_el[i] = 0.
+                num_e[i] = 0.
+                num_h[i] = 0.
+            else:
+                #mu,ne,nh = self.atat_charge_neut(dE,temps[i])
+                mu,ne,nh = self.charge_neutrality2(dE,temps[i])
+                #mu,ne,nh = self.fsolve_neutrality(dE,temps[i],mu_e[i-1])
+                mu_e[i] = mu
+                num_e[i] = ne
+                num_h[i] = nh
+                S_el[i] = self.calc_Selec(mu/dE,BOLTZCONST*temps[i]/dE)
+                if temps[i] > 0.0:
+                    if E0 == None:
+                        E0 = self.calc_Eelec(mu,BOLTZCONST*(temps[1]-temps[0]),dE)
+                    E_el[i] = self.calc_Eelec(mu,BOLTZCONST*temps[i],dE) - E0
+                F_el[i] = E_el[i] - BOLTZCONST*temps[i]*S_el[i]
+        self.temps = temps
+        self.mu_e = mu_e
+        self.E_el = E_el
+        self.S_el = S_el
+        self.F_el = F_el
+        self.num_e = num_e
+        self.num_h = num_h
 
     def get_bandgap(self):
         """
@@ -205,102 +348,16 @@ class ElectronicDOS:
         self.e_min = self.e_min - new_ref
         self.e_max = self.e_max - new_ref
         self.e_fermi = self.e_fermi - new_ref
+        self.vbm = self.vbm - new_ref
+        self.cbm = self.cbm - new_ref
         try:
-            self.vbm = self.vbm - new_ref
-            self.cbm = self.cbm - new_ref
             self.mu_e = self.mu_e - new_ref
         except:
             pass
 
-    def sum_dos(self,weight,start,end,args=None):
-        """
-        Sums the density of states, dos, in the energy range [start,end], weighted
-        by the function weight, which takes as inputs energy and args.
-        """
-        flag = False
-        sum = 0.
-        for i in range(len(self.energy)):
-            if flag:
-                sum += self.step_size*self.dos_tot[i]*weight(
-                        self.energy[i],args)
-                if self.energy[i] > end:
-                    break
-            elif self.energy[i] >= start:
-                flag = True
-        return sum
-
-    def integrate_dos(self,weight,start,end,args=None,threshold=0.1):
-        """
-        Takes numpy arrays containing the energy and dos and integrates them over
-        the range [start,end] with the weighting function weight. Weight should take
-        as an argument the integrated energy and a list of other arguements args.
-        """
-        def integrand(x,weight,args):
-            return self.dos_spline(x)*weight(x,args)
-        result = quad(
-                integrand,start,end,args=(weight,args),full_output=1,limit=350)
-        integral = result[0]
-        error = result[1]
-        #if error > integral*threshold:
-        #    print "Numerical integration error is greater than"
-        #    print str(threshold)+" of the integrated value."
-        #    sys.exit(1)
-        return integral
-
-    def n(self,mu_e,T):
-        """
-        Calculate the intrinsic number of conduction electrons per atom at an
-        electron chemical potential mu_e and temperature T.
-        """
-        def fermi(x,args):
-            mu = args[0]; T = args[1]
-            return 1./(np.exp((x-mu)/(BOLTZCONST*T))+1.)
-        #n = self.integrate_dos(fermi,self.cbm,self.e_max,args=(mu_e,T))
-        n = self.sum_dos(fermi,self.cbm,self.e_max,args=(mu_e,T))
-        return n
-
-    def p(self,mu_e,T):
-        """
-        Calculate the intrinsic number of valence holes per atom at an electron
-        chemical potential of mu_e and temperature T.
-        """
-        def fermi(x,args):
-            mu = args[0]; T = args[1]
-            return 1./(np.exp((mu-x)/(BOLTZCONST*T))+1.)
-        #p = self.integrate_dos(fermi,self.e_min,self.vbm,args=(mu_e,T))
-        p = self.sum_dos(fermi,self.e_min,self.vbm,args=(mu_e,T))
-        return p
-
-    def charge_neut2(self,mu_e,args):
-        T = args[0]; n_elec = args[1]
-        n_sum = self.sum_dos(fermi,self,e_start,self.e_end,args=(mu_e,T))
-        return n_elec - n_sum
-
-    def charge_neutrality(self,mu_e,args):
-        """
-        Condition for charge neutrality for intrinsic doping in a perfect
-        semiconductor. This function should be overwritten for a more
-        complicated case. 
-        """
-        T = args  # Args could also include atomic chemical potentials.
-        return self.p(mu_e,T) - self.n(mu_e,T)
-
-    def calc_mu_e(self,temp):
-        """
-        Calculate the electron chemical potential at temperature temp using the
-        condition of charge neutrality.
-        """
-        mu_e = fsolve(self.charge_neutrality,self.e_fermi,args=(temp))
-        return mu_e
-
 def test2(argv):
     import matplotlib.pyplot as plt
     doscar1 = ElectronicDOS(open(str(argv[0]),'r'))
-    for i in range(len(doscar1.dos_tot)):
-        if doscar1.dos_tot[i] > 1e-2:
-            e = doscar1.energy[i]
-            break
-    doscar1.shift_energy(e)
     doscar2 = ElectronicDOS(open(str(argv[1]),'r'),format="ezvasp")
     plt.plot(doscar1.energy,doscar1.dos_tot)
     plt.plot(doscar2.energy,doscar2.dos_tot)
@@ -316,7 +373,12 @@ def test3(argv):
     print doscar.F_el
 
 def test1(argv):
-    doscar = ElectronicDOS(open(str(argv[0]),'r'))
+    if len(argv) < 2:
+        doscar = ElectronicDOS(open(str(argv[0]),'r'))
+    else:
+        doscar = ElectronicDOS(open(str(argv[0]),'r'),format=str(argv[1]))
+    for i in range(len(doscar.temps)):
+        print doscar.temps[i],doscar.mu_e[i],doscar.E_el[i],doscar.S_el[i],doscar.F_el[i],doscar.num_e[i],doscar.num_h[i]
     #plt.plot(doscar.energy,doscar.dos_tot)
     #plt.show()
 
@@ -333,4 +395,4 @@ def main(argv):
 
 if __name__ == "__main__":
     import sys
-    test2(sys.argv[1:])
+    test1(sys.argv[1:])

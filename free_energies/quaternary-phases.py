@@ -1,4 +1,4 @@
-#!/software/enthought/python/epd-7.1-2-rh5-x86_64/bin/python
+#!/usr/bin/python
 #quaternary-phases.py v1.0 4-16-2012 Jeff Doak jeff.w.doak@gmail.com
 
 #This program calculates tie lines on an isothermal section (T=0K) of a 
@@ -74,20 +74,21 @@ for i in range(num_compounds):
     stoich[:,i] = sp.array(compounds[i][1:1+num_elements])
 #Loop over every pair of compounds and determine if tie-line exists
 #between them
-tol = 1E-6
+tol = 1E-4
 text = "{"
 for i in range(num_compounds):
     for j in range(i+1,num_compounds):
         for k in range(j+1,num_compounds):
             for l in range(k+1,num_compounds):
                 phase_vec = sp.zeros(num_compounds)
-                phase_vec[i] = 0.25
-                phase_vec[j] = 0.25
-                phase_vec[k] = 0.25
-                phase_vec[l] = 0.25
+                phase_vec[i] = 0.35
+                phase_vec[j] = 0.15
+                phase_vec[k] = 0.35
+                phase_vec[l] = 0.15
                 comp_vec = sp.dot(stoich,phase_vec)
                 phase_min = min_gibbs(phase_vec,energies,comp_vec,stoich)
-                phase_diff = linalg.norm(phase_vec-phase_min)
+                #phase_diff = linalg.norm(phase_vec-phase_min)
+                phase_diff = gibbs(phase_vec,energies,comp_vec,stoich) - gibbs(phase_min,energies,comp_vec,stoich)
                 #print phase_diff
                 if phase_diff < tol:
                     stoich2 = sp.zeros((4,4))
@@ -98,8 +99,11 @@ for i in range(num_compounds):
                     energy2 = sp.zeros(4)
                     energy2[0] = energies[i]; energy2[1] = energies[j]
                     energy2[2] = energies[k]; energy2[3] = energies[l]
-                    mu = sp.dot(sp.linalg.inv(stoich2),energy2)
                     print compounds[i][0]+"-"+compounds[j][0]+"-"+compounds[k][0]+"-"+compounds[l][0]
+                    print "    delta energy: "+str(phase_diff)
+                    print phase_vec
+                    print phase_min
+                    mu = sp.dot(sp.linalg.inv(stoich2),energy2)
                     print "mu_Na= "+str(mu[0])+" mu_Pb= "+str(mu[1])+" mu_S= "+str(mu[2])+" mu_Te= "+str(mu[3])
                     print
 

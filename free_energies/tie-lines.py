@@ -74,7 +74,7 @@ for i in range(num_compounds):
     stoich[:,i] = sp.array(compounds[i][1:1+num_elements])
 #Loop over every pair of compounds and determine if tie-line exists
 #between them
-tol = 1E-6
+tol = 1E-4
 text = "{"
 for i in range(num_compounds):
     for j in range(i+1,num_compounds):
@@ -83,14 +83,15 @@ for i in range(num_compounds):
         phase_vec[j] = 0.5
         comp_vec = sp.dot(stoich,phase_vec)
         phase_min = min_gibbs(phase_vec,energies,comp_vec,stoich)
-        phase_diff = linalg.norm(phase_vec-phase_min)
+        #phase_diff = linalg.norm(phase_vec-phase_min)
+        phase_diff = gibbs(phase_vec,energies,comp_vec,stoich) - gibbs(phase_min,energies,comp_vec,stoich)
         #print phase_diff
         if phase_diff < tol:
-            #print "----------"+compounds[i][0]+"-----"+compounds[j][0]+"----------"
-            one = ",".join([ str(a) for a in stoich[:,i] ])
-            two = ",".join([ str(a) for a in stoich[:,j] ])
-            text += "{{"+one+"},{"+two+"}},"
-            #print stoich[:,i],"-->",stoich[:,j]
+            print "----------"+compounds[i][0]+"-----"+compounds[j][0]+"----------"
+            #one = ",".join([ str(a) for a in stoich[:,i] ])
+            #two = ",".join([ str(a) for a in stoich[:,j] ])
+            #text += "{{"+one+"},{"+two+"}},"
+            print stoich[:,i],"-->",stoich[:,j]
 text += "};"
 print text
 

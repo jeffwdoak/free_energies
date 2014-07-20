@@ -1,11 +1,10 @@
 #!/usr/bin/python
 
-# electronicdos.py v0.5 5-16-2012 Jeff Doak jeff.w.doak@gmail.com
+# electronicdos.py v1.3 8-06-2013 Jeff Doak jeff.w.doak@gmail.com
 import numpy as np
-from scipy.interpolate import UnivariateSpline
-from scipy.integrate import quad
-from scipy.optimize import fsolve
-import sys, subprocess
+from scipy.optimize import brentq
+import sys
+import subprocess
 
 BOLTZCONST = 8.617e-5 #eV/K
 
@@ -48,6 +47,8 @@ class ElectronicDOS:
         in temp (kB/atom)
     - F_el - numpy array of electronic free energy calculated at each
         temperature in temp (eV/atom)
+
+    Class Methods:
     """
 
     def __init__(self,input_,format=None):
@@ -63,12 +64,13 @@ class ElectronicDOS:
                 self.read_ezvasp_dos(input_)
             else:
                 self.read_doscar(input_)
-                nelec = subprocess.Popen("grep NELECT OUTCAR",
-                    shell=True,stdin=None,stdout=subprocess.PIPE).communicate()[0]
-                self.nelec = int(float(nelec.split()[2]))
+            	#nelec = subprocess.Popen("grep NELECT OUTCAR",
+            	#    shell=True,stdin=None,stdout=subprocess.PIPE).communicate()[0]
+            	#self.nelec = int(float(nelec.split()[2]))
             self.get_bandgap()
         # Calculate finite temperature properties
         self.temp = np.linspace(0,2000,21)
+        #self.temp[0] = 1.
         self.mu_e = np.zeros_like(self.temp)
         self.num_e = np.zeros_like(self.temp)
         self.num_h = np.zeros_like(self.temp)
@@ -79,13 +81,13 @@ class ElectronicDOS:
         self.E_el_0 = None
         tol = 1e-5
         for i in range(len(self.temp)):
-            if i < tol:
+            if self.temp[i] < tol:
                 self.mu_e[i] = self.e_fermi
                 self.E_el[i] = 0.0
                 self.S_el[i] = 0.0
                 self.num_e[i] = 0.0
                 self.num_h[i] = 0.0
-            elif i > 0.0:
+            elif self.temp[i] > tol:
                 self.mu_e[i] = self.calc_mu_e(self.temp[i])
                 if self.E_el_0 == None:
                     self.E_el_0 = self.calc_E_el(self.mu_e[i],self.temp[i])
@@ -110,10 +112,12 @@ class ElectronicDOS:
         line = input_.readline().split()
         self.e_max = float(line[0])
         self.e_min = float(line[1])
+	self.n_dos = int(line[2])
         self.e_fermi = float(line[3])
         energy = []; dos_tot = []; dos_spin = []
-        for line in input_:
-            line = line.split()
+        #for line in input_:
+	for i in range(self.n_dos):
+            line = input_.readline().split()
             energy.append(float(line[0]))
             if len(line) == 3:
                 dos_tot.append(float(line[1]))  # DOS includes spin up and down
@@ -122,11 +126,10 @@ class ElectronicDOS:
                 dos_tot.append(float(line[1])+float(line[2]))
                 dos_spin.append(float(line[1])-float(line[2]))
         self.energy = np.array(energy)
-        #self.dos_tot = np.array(dos_tot)/float(self.n_atoms)
-        self.dos_tot = np.array(dos_tot)
-        #self.dos_spin = np.array(dos_spin)/float(self.n_atoms)
-        self.dos_spin = np.array(dos_spin)
-        self.dos_spline = UnivariateSpline(self.energy,self.dos_tot)
+        self.dos_tot = np.array(dos_tot)/float(self.n_atoms)
+        self.dos_spin = np.array(dos_spin)/float(self.n_atoms)
+        #self.dos_tot = np.array(dos_tot)
+        #self.dos_spin = np.array(dos_spin)
 
     def read_ezvasp_dos(self,input_):
         """
@@ -151,7 +154,7 @@ class ElectronicDOS:
         self.energy = np.array(energy)
         self.dos_tot = np.array(dos_tot)
         self.dos_spin = np.zeros_like(self.dos_tot) # Change this for spin-polar
-        self.dos_spline = UnivariateSpline(self.energy,self.dos_tot)
+        #self.dos_spline = UnivariateSpline(self.energy,self.dos_tot)
         self.e_max = self.energy[-1]
         # Find the 0 Kelvin 'Fermi Energy' using ATAT's method
         ne = 0.0
@@ -195,7 +198,6 @@ class ElectronicDOS:
         self.cbm = self.cbm - new_ref
         self.mu_e = self.mu_e - new_ref
 
-    #def sum_dos(self,weight,start,end,args=None):
     def sum_dos(self,weight,start,end,args=None):
         """
         Sums the density of states, dos, in the energy range [start,end], weighted
@@ -213,25 +215,6 @@ class ElectronicDOS:
                 flag = True
         return sum
 
-    #def integrate_dos(self,weight,start,end,args=None,threshold=0.1):
-    def ium_dos(self,weight,start,end,args=None,threshold=0.1):
-        """
-        Takes numpy arrays containing the energy and dos and integrates them over
-        the range [start,end] with the weighting function weight. Weight should take
-        as an argument the integrated energy and a list of other arguements args.
-        """
-        def integrand(x,weight,args):
-            return self.dos_spline(x)*weight(x,args)
-        result = quad(
-                integrand,start,end,args=(weight,args),full_output=1,limit=350)
-        integral = result[0]
-        error = result[1]
-        #if error > integral*threshold:
-        #    print "Numerical integration error is greater than"
-        #    print str(threshold)+" of the integrated value."
-        #    sys.exit(1)
-        return integral
-
     def n(self,mu_e,T):
         """
         Calculate the intrinsic number of conduction electrons per atom at an
@@ -240,8 +223,6 @@ class ElectronicDOS:
         def fermi(x,args):
             mu = args[0]; T = args[1]
             return 1./(np.exp((x-mu)/(BOLTZCONST*T))+1.)
-        #n = self.integrate_dos(fermi,self.cbm,self.e_max,args=(mu_e,T))
-        #n = self.sum_dos(fermi,self.cbm,self.e_max,args=(mu_e,T))
         n = self.sum_dos(fermi,mu_e,self.e_max,args=(mu_e,T))
         return n
 
@@ -253,18 +234,8 @@ class ElectronicDOS:
         def fermi(x,args):
             mu = args[0]; T = args[1]
             return 1./(np.exp((mu-x)/(BOLTZCONST*T))+1.)
-        #p = self.integrate_dos(fermi,self.e_min,self.vbm,args=(mu_e,T))
-        #p = self.sum_dos(fermi,self.e_min,self.vbm,args=(mu_e,T))
         p = self.sum_dos(fermi,self.e_min,mu_e,args=(mu_e,T))
         return p
-
-    def charge_neut2(self,mu_e,args):
-        def fermi(x,args):
-            mu = args[0]; T = args[1]
-            return 1./(np.exp((x-mu)/(BOLTZCONST*T))+1.)
-        T = args
-        n_sum = self.sum_dos(fermi,self.e_min,self.e_max,args=(mu_e,T))
-        return self.nelec - n_sum
 
     def charge_neutrality(self,mu_e,args):
         """
@@ -275,13 +246,39 @@ class ElectronicDOS:
         T = args  # Args could also include atomic chemical potentials.
         return self.p(mu_e,T) - self.n(mu_e,T)
 
+    def bracket_mu_e(self,args):
+        """
+        Function to find a bracket around the root of charge_neutrality.
+        Returns a tuple containing the lower and upper bounds for the root.
+        """
+        a = (self.vbm+self.cbm)/2.
+        b = (self.vbm+self.cbm)/2.
+        if self.band_gap < 1e-5:
+            dx = self.step_size*5.
+        else:
+            dx = (self.cbm-self.vbm)/10.
+        g = np.sqrt(2.)
+        fa = self.charge_neutrality(a,args)
+        fb = self.charge_neutrality(b,args)
+        while True:
+            a = a - dx
+            fa = self.charge_neutrality(a,args)
+            if np.sign(fa) != np.sign(fb):
+                break
+            b = b + dx
+            fb = self.charge_neutrality(b,args)
+            if np.sign(fa) != np.sign(fb):
+                break
+            dx = (b - a)*g
+        return a,b
+
     def calc_mu_e(self,temp):
         """
         Calculate the electron chemical potential at temperature temp using the
         condition of charge neutrality.
         """
-        #mu_e = fsolve(self.charge_neutrality,self.e_fermi,args=(temp))
-        mu_e = fsolve(self.charge_neut2,self.e_fermi,args=(temp))
+        lower,upper = self.bracket_mu_e(temp)
+        mu_e = brentq(self.charge_neutrality,lower,upper,args=(temp))
         return mu_e
 
     def calc_E_el(self,mu_e,T):
@@ -299,9 +296,6 @@ class ElectronicDOS:
                 return 0.0
             else:
                 return x/(np.exp((x-mu)/(BOLTZCONST*T))+1.)
-        #E = self.integrate_dos(fermi_energy,self.e_min,self.e_max,args=(mu_e,T))
-        #E_0 = self.integrate_dos(
-        #        fermi_energy,self.e_min,self.e_max,args=(mu_e,T))
         E = self.sum_dos(fermi_energy,self.e_min,self.e_max,args=(mu_e,T))
         #E_0 = self.sum_dos(energy,self.e_min,self.e_fermi,args=None)
         return E
@@ -319,69 +313,19 @@ class ElectronicDOS:
                 return -f*np.log(f)-(1.-f)*np.log(1.-f)
             else:
                 return 0.0
-            #f = -np.log(np.exp(x)+1)/(np.exp(x)+1)
-            #f += -np.log(np.exp(-x)+1)/(np.exp(-x)+1)
-            #return f
-        #S = self.integrate_dos(weight,self.e_min,self.e_max,args=(mu_e,T))
         S = self.sum_dos(weight,self.e_min,self.e_max,args=(mu_e,T))
         return S
 
-def fermi_dirac_dist(x,args):
-    """
-    Calculates the Fermi-Dirac distribution for an energy x, temperature
-    args[0], and electron chemical potential args[1].
-    """
-    T = args[0]; mu = args[1]
-    return 1./(np.exp((x-mu)/(BOLTZCONST*T))+1.)
-
-def test2(argv):
-    doscar = ElectronicDOS(open(str(argv[0]),'r'))
-    T = 500
-    #n = doscar.integrate_dos(
-    #        fermi_dirac_dist,doscar.cbm,doscar.e_max,args=(T,doscar.e_fermi))
-    p = doscar.p(doscar.e_fermi,T)
-    print p
-
-def test3(argv):
-    format = None
-    if len(argv) > 1:
-        format = str(argv[1])
-    doscar = ElectronicDOS(open(str(argv[0]),'r'),format)
-    print doscar.temp
-    print doscar.num_e
-    print doscar.num_h
-    print doscar.E_el
-    print doscar.S_el
-    print doscar.F_el
-
-def atat_test(argv):
-    format = None
-    if len(argv) > 1:
-        format = str(argv[1])
-    doscar = ElectronicDOS(open(str(argv[0]),'r'),format)
-    print doscar.E_el_0
-    for i in range(len(doscar.temp)):
-        print doscar.temp[i],doscar.mu_e[i],doscar.E_el[i],doscar.S_el[i],doscar.F_el[i]
-
-
-def test1(argv):
-    import matplotlib.pyplot as plt
-    doscar = ElectronicDOS(open(str(argv[0]),'r'))
-    plt.plot(doscar.energy,doscar.dos_tot)
-    plt.show()
-
 def main(argv):
-    import matplotlib.pyplot as plt
-    doscar = open(str(argv[0]))
-    e_fermi,energy,n_tot,n_spin = read_doscar(doscar)
-    plt.plot(energy,n_tot)
-    if len(argv) > 1:
-        doscar2 = open(str(argv[1]))
-        e_fermi2,energy2,n_tot2,n_spin2 = read_doscar(doscar2)
-        plt.plot(energy2,n_tot2)
-    plt.show()
+    edos_name = str(argv[0])
+    if edos_name == "dos.out":
+	edos = ElectronicDOS(edos_name,"ezvasp")
+    else:
+        edos = ElectronicDOS(edos_name)
+    print "T_(K), mu_e_(eV), n_e_(#/atom), n_h_(#/atom), E_el_(eV/atom), S_el_(eV/K/atom), F_el_(eV/atom)"
+    for i in range(len(edos.temp)):
+        print edos.temp[i],edos.mu_e[i],edos.num_e[i],edos.num_h[i],edos.E_el[i],edos.S_el[i],edos.F_el[i]
+    sys.exit()
 
 if __name__ == "__main__":
-    import sys
-    #test3(sys.argv[1:])
-    atat_test(sys.argv[1:])
+    main(sys.argv[1:])
